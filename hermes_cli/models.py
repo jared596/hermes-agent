@@ -1228,7 +1228,6 @@ _PROVIDER_ALIASES = {
     "minimax_oauth": "minimax-oauth",
     "claude": "anthropic",
     "claude-code": "anthropic",
-    "claude-code-cli": "anthropic",
     "deep-seek": "deepseek",
     "opencode": "opencode-zen",
     "zen": "opencode-zen",

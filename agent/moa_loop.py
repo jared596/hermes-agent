@@ -135,14 +135,19 @@ def _slot_runtime(slot: dict[str, str]) -> dict[str, Any]:
     gets its provider's real API surface — e.g. MiniMax → anthropic_messages,
     GPT-5/o-series → max_completion_tokens, custom endpoints → their base_url.
 
-    Returns the kwargs to pass through to ``call_llm`` (provider/model plus the
-    resolved base_url/api_key when available). Falls back to the bare
-    provider/model on any resolution error so a misconfigured slot still
-    attempts the call rather than aborting the whole MoA turn.
+    External-process providers such as ``claude-code-cli`` are intentionally
+    excluded from runtime-provider resolution: resolving that name through the
+    generic auth layer can normalize it to Anthropic/OAuth and route away from
+    the local CLI wrapper. Returns the kwargs to pass through to ``call_llm``
+    (provider/model plus the resolved base_url/api_key when available). Falls
+    back to the bare provider/model on any resolution error so a misconfigured
+    slot still attempts the call rather than aborting the whole MoA turn.
     """
     provider = str(slot.get("provider") or "").strip()
     model = str(slot.get("model") or "").strip()
     out: dict[str, Any] = {"provider": provider, "model": model}
+    if provider.strip().lower() == "claude-code-cli":
+        return out
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
 

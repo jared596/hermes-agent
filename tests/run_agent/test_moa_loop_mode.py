@@ -215,6 +215,34 @@ def test_moa_codex_slot_preserves_provider_identity(monkeypatch):
     assert base_url == "https://chatgpt.com/backend-api/codex"
 
 
+def test_moa_claude_code_cli_slot_stays_external_process(monkeypatch):
+    """claude-code-cli MoA slots must go through the local Claude CLI wrapper.
+
+    The generic runtime provider resolver aliases Claude-ish names to
+    Anthropic/OAuth.  That is correct for native Anthropic routes, but wrong
+    for this explicit external-process provider: passing Anthropic base_url or
+    api_key fields into call_llm bypasses ClaudeCodeCliAuxiliaryClient and
+    reintroduces the cron "no API key / extra usage" failures.
+    """
+    from agent import moa_loop
+
+    def fail_if_called(*, requested, target_model=None):
+        raise AssertionError("claude-code-cli must not use runtime provider resolution")
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fail_if_called
+    )
+
+    rt = moa_loop._slot_runtime(
+        {"provider": "claude-code-cli", "model": "claude-opus-4-8"}
+    )
+
+    assert rt == {"provider": "claude-code-cli", "model": "claude-opus-4-8"}
+    assert "base_url" not in rt
+    assert "api_key" not in rt
+    assert "api_mode" not in rt
+
+
 @pytest.mark.parametrize("provider", ["minimax-oauth", "qwen-oauth"])
 def test_moa_provider_backed_slot_survives_aux_resolution(monkeypatch, provider):
     """MoA can pass resolved endpoints for provider-backed slots without
