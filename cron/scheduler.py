@@ -1781,7 +1781,7 @@ def _get_script_timeout() -> int:
     return _DEFAULT_SCRIPT_TIMEOUT
 
 
-def _run_job_script(script_path: str) -> tuple[bool, str]:
+def _run_job_script(script_path: str, extra_env: Optional[dict[str, str]] = None) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
     Scripts must reside within HERMES_HOME/scripts/.  Both relative and
@@ -1867,13 +1867,17 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         from tools.environments.local import _sanitize_subprocess_env
 
         popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+        child_env = _sanitize_subprocess_env(os.environ.copy())
+        if extra_env:
+            child_env.update({str(k): str(v) for k, v in extra_env.items()})
+
         result = subprocess.run(
             argv,
             capture_output=True,
             text=True,
             timeout=script_timeout,
             cwd=str(path.parent),
-            env=_sanitize_subprocess_env(os.environ.copy()),
+            env=child_env,
             **popen_kwargs,
         )
         stdout = (result.stdout or "").strip()
@@ -1904,6 +1908,62 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Script execution failed: {exc}"
 
+
+
+def _scrub_internal_cron_report_noise(text: str) -> str:
+    """Remove internal verifier/tooling footers from cron chat delivery."""
+    if not text:
+        return text
+    scrubbed = re.split(r"\n+⚠️ File-mutation verifier:", text, maxsplit=1)[0]
+    scrubbed = re.sub(
+        r"\n+This is (?:explicitly |focused |targeted )?ad-hoc verification, not [^\n]+(?:\n|$)",
+        "\n",
+        scrubbed,
+        flags=re.I,
+    )
+    scrubbed = re.sub(
+        r"\n+This is \*\*ad-hoc verification\*\*, not [^\n]+(?:\n|$)",
+        "\n",
+        scrubbed,
+        flags=re.I,
+    )
+    return scrubbed.strip()
+
+
+def _apply_final_report_script(job: dict, final_response: str) -> str:
+    """Replace/scrub agent cron final responses before public delivery."""
+    configured_script = str(
+        job.get("final_report_script")
+        or job.get("report_script")
+        or ""
+    ).strip()
+    final_response = _scrub_internal_cron_report_noise(final_response)
+    script_path = configured_script or "cron-final-report-generic-agent.py"
+    if not script_path:
+        return final_response
+
+    report_env = {
+        "HERMES_CRON_JOB_ID": job.get("id", ""),
+        "HERMES_CRON_JOB_NAME": job.get("name", ""),
+        "HERMES_CRON_FINAL_RESPONSE": final_response,
+        "HERMES_CRON_FINAL_REPORT_CONFIGURED": "1" if configured_script else "0",
+    }
+    ok, report = _run_job_script(script_path, extra_env=report_env)
+    if ok and report.strip():
+        logger.info(
+            "Job '%s': final response replaced by report script %s",
+            job.get("id", "?"),
+            script_path,
+        )
+        return report.strip()
+
+    logger.warning(
+        "Job '%s': final report script %s did not produce a usable report: %s",
+        job.get("id", "?"),
+        script_path,
+        report,
+    )
+    return final_response
 
 def _parse_wake_gate(script_output: str) -> bool:
     """Parse the last non-empty stdout line of a cron job's pre-check script
@@ -2037,6 +2097,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
+        "REPORTING: Your final response must be the operational job report "
+        "the job requested, not an ad-hoc verification transcript. Do not make "
+        "temporary verifier scripts, cleanup logs, or file-mutation verifier "
+        "warnings the main report; if verification matters, compress it into "
+        "one concise validation line. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
@@ -2959,6 +3024,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Strip leaked placeholder text that upstream may inject on empty completions.
         if final_response.strip() == "(No response generated)":
             final_response = ""
+        if final_response.strip().upper() != SILENT_MARKER:
+            final_response = _apply_final_report_script(job, final_response)
         # Cron silence on abnormal empty turns.  The turn-completion explainer
         # (#34452) replaces a blank/empty model turn with a "⚠️ No reply: …"
         # string so interactive surfaces (CLI/gateway) explain why the box is

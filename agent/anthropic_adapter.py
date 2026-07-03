@@ -994,6 +994,36 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
     return kc_creds or file_creds
 
 
+def _read_default_hermes_env_token(*keys: str) -> Optional[str]:
+    """Read a Claude/Anthropic token from the root Hermes .env as a profile fallback.
+
+    Profile-scoped cron processes run with HERMES_HOME set to
+    ~/.hermes/profiles/<name>, but Claude Code OAuth setup often stores its
+    token in the root ~/.hermes/.env.  Do not copy or mutate that token here;
+    just read it when the active process environment/profile lacks one.
+    """
+    env_path = Path.home() / ".hermes" / ".env"
+    try:
+        if env_path == get_hermes_home() / ".env" or not env_path.is_file():
+            return None
+        wanted = set(keys)
+        for raw_line in env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            key, _, value = line.partition("=")
+            if key.strip() not in wanted:
+                continue
+            token = value.strip().strip("\"'")
+            if token:
+                return token
+    except Exception:
+        logger.debug("Failed to read root Hermes .env Anthropic token fallback", exc_info=True)
+    return None
+
+
 def is_claude_code_token_valid(creds: Dict[str, Any]) -> bool:
     """Check if Claude Code credentials have a non-expired access token."""
     import time
@@ -1277,10 +1307,11 @@ def resolve_anthropic_token() -> Optional[str]:
     Priority:
       1. ANTHROPIC_TOKEN env var (OAuth/setup token saved by Hermes)
       2. CLAUDE_CODE_OAUTH_TOKEN env var
-      3. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
+      3. Root ~/.hermes/.env OAuth token fallback for profile-scoped cron
+      4. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
          — with automatic refresh if expired and a refresh token is available
-      4. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
-      5. ANTHROPIC_API_KEY env var (regular API key, or legacy fallback)
+      5. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
+      6. ANTHROPIC_API_KEY env var (regular API key, or legacy fallback)
 
     Returns the token string or None.
     """
@@ -1302,17 +1333,25 @@ def resolve_anthropic_token() -> Optional[str]:
             return preferred
         return cc_token
 
-    # 3. Claude Code credential file
+    # 3. Profile-scoped cron fallback to root ~/.hermes/.env.
+    root_env_token = _read_default_hermes_env_token("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    if root_env_token:
+        preferred = _prefer_refreshable_claude_code_token(root_env_token, creds)
+        if preferred:
+            return preferred
+        return root_env_token
+
+    # 4. Claude Code credential file
     resolved_claude_token = _resolve_claude_code_token_from_credentials(creds)
     if resolved_claude_token:
         return resolved_claude_token
 
-    # 4. Hermes credential_pool OAuth entry.
+    # 5. Hermes credential_pool OAuth entry.
     resolved_pool_token = _resolve_anthropic_pool_token()
     if resolved_pool_token:
         return resolved_pool_token
 
-    # 5. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
+    # 6. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
     # This remains as a compatibility fallback for pre-migration Hermes configs.
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if api_key:

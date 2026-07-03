@@ -44,6 +44,8 @@ import contextlib
 import json
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path  # noqa: F401 — used by test mocks
@@ -1291,6 +1293,102 @@ class AnthropicAuxiliaryClient:
             close_fn()
 
 
+def _claude_cli_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+                elif "text" in block:
+                    parts.append(str(block.get("text") or ""))
+            elif block is not None:
+                parts.append(str(block))
+        return "\n".join(part for part in parts if part)
+    return "" if content is None else str(content)
+
+
+def _claude_cli_messages_to_prompt(messages: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").upper()
+        text = _claude_cli_content_text(message.get("content")).strip()
+        if text:
+            lines.append(f"{role}:\n{text}")
+    return "\n\n".join(lines).strip()
+
+
+def _claude_cli_cwd() -> Optional[str]:
+    raw = (os.environ.get("TERMINAL_CWD") or "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_dir():
+            return str(candidate)
+    return None
+
+
+def _claude_cli_command(claude_bin: str, model: str) -> list[str]:
+    cmd = [claude_bin, "-p", "--model", model]
+    if (os.environ.get("HERMES_CRON_SESSION") or "").strip() == "1":
+        cmd.extend(["--permission-mode", "bypassPermissions"])
+    return cmd
+
+
+class _ClaudeCodeCliCompletionsAdapter:
+    def create(self, **kwargs) -> Any:
+        model = str(kwargs.get("model") or "claude-opus-4-8")
+        timeout = float(kwargs.get("timeout") or 300)
+        prompt = _claude_cli_messages_to_prompt(kwargs.get("messages") or [])
+        if not prompt:
+            prompt = "Respond briefly."
+
+        claude_bin = shutil.which("claude") or shutil.which("claude-code")
+        if not claude_bin:
+            raise RuntimeError("claude-code-cli provider requested but no claude CLI was found on PATH")
+
+        proc = subprocess.run(
+            _claude_cli_command(claude_bin, model),
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=_claude_cli_cwd(),
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"claude-code-cli failed with exit {proc.returncode}: {err}")
+
+        assistant_message = SimpleNamespace(content=(proc.stdout or "").strip(), tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(index=0, message=assistant_message, finish_reason="stop")],
+            model=model,
+            usage=None,
+        )
+
+
+class _ClaudeCodeCliChatShim:
+    def __init__(self):
+        self.completions = _ClaudeCodeCliCompletionsAdapter()
+
+
+class ClaudeCodeCliAuxiliaryClient:
+    """OpenAI-client-compatible wrapper around the installed Claude Code CLI."""
+
+    api_key = "external-claude-code-cli"
+    base_url = "claude-code-cli://local"
+
+    def __init__(self):
+        self.chat = _ClaudeCodeCliChatShim()
+
+    def close(self):
+        return None
+
+
 class _AsyncAnthropicCompletionsAdapter:
     def __init__(self, sync_adapter: _AnthropicCompletionsAdapter):
         self._sync = sync_adapter
@@ -2392,11 +2490,16 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
         return None, None
 
     pool_present, entry = _select_pool_entry("anthropic")
-    if pool_present:
-        if entry is None:
-            return None, None
+    if pool_present and entry is not None:
         token = explicit_api_key or _pool_runtime_api_key(entry)
     else:
+        token = None
+
+    if not token:
+        # A profile can have an Anthropic pool/auth shell with no usable entry
+        # while Claude Code OAuth lives in the root Hermes/Claude credentials.
+        # Do not let the empty pool mask that fallback path.
+        pool_present = False
         entry = None
         token = explicit_api_key or resolve_anthropic_token()
     if not token:
@@ -4224,6 +4327,13 @@ def resolve_provider_client(
             )
             return None, None
         final_model = _normalize_resolved_model(model or default, provider)
+        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                else (client, final_model))
+
+    # ── Claude Code CLI (external process) ─────────────────────────
+    if provider == "claude-code-cli":
+        final_model = _normalize_resolved_model(model or "claude-opus-4-8", provider)
+        client = ClaudeCodeCliAuxiliaryClient()
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))
 

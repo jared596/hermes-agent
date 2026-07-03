@@ -279,6 +279,7 @@ ALIASES: Dict[str, str] = {
     # anthropic
     "claude": "anthropic",
     "claude-code": "anthropic",
+    "claude-code-cli": "anthropic",
 
     # github-copilot (models.dev ID)
     "copilot": "github-copilot",

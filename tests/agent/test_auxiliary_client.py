@@ -5079,3 +5079,70 @@ class TestCompressionFallbackContextFilter:
         # Empty / unknown tasks have no minimum
         assert _task_minimum_context_length("") is None
         assert _task_minimum_context_length(None) is None
+
+
+class TestClaudeCodeCliAuxiliaryClient:
+    def test_cli_subprocess_uses_terminal_cwd(self, tmp_path, monkeypatch):
+        from agent.auxiliary_client import _ClaudeCodeCliCompletionsAdapter
+
+        run_calls = []
+
+        def fake_run(*args, **kwargs):
+            run_calls.append((args, kwargs))
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+        monkeypatch.setattr("agent.auxiliary_client.shutil.which", lambda name: "/usr/bin/claude")
+        monkeypatch.setattr("agent.auxiliary_client.subprocess.run", fake_run)
+
+        adapter = _ClaudeCodeCliCompletionsAdapter()
+        result = adapter.create(
+            model="claude-opus-4-8",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        assert result.choices[0].message.content == "ok"
+        assert run_calls[0][1]["cwd"] == str(tmp_path)
+
+    def test_cli_subprocess_omits_missing_terminal_cwd(self, tmp_path, monkeypatch):
+        from agent.auxiliary_client import _ClaudeCodeCliCompletionsAdapter
+
+        missing = tmp_path / "missing"
+        run_calls = []
+
+        def fake_run(*args, **kwargs):
+            run_calls.append((args, kwargs))
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setenv("TERMINAL_CWD", str(missing))
+        monkeypatch.setattr("agent.auxiliary_client.shutil.which", lambda name: "/usr/bin/claude")
+        monkeypatch.setattr("agent.auxiliary_client.subprocess.run", fake_run)
+
+        adapter = _ClaudeCodeCliCompletionsAdapter()
+        adapter.create(
+            model="claude-opus-4-8",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        assert run_calls[0][1]["cwd"] is None
+
+    def test_cli_subprocess_bypasses_permissions_only_in_cron(self, monkeypatch):
+        from agent.auxiliary_client import _claude_cli_command
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        assert _claude_cli_command("/usr/bin/claude", "claude-opus-4-8") == [
+            "/usr/bin/claude",
+            "-p",
+            "--model",
+            "claude-opus-4-8",
+        ]
+
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        assert _claude_cli_command("/usr/bin/claude", "claude-opus-4-8") == [
+            "/usr/bin/claude",
+            "-p",
+            "--model",
+            "claude-opus-4-8",
+            "--permission-mode",
+            "bypassPermissions",
+        ]
