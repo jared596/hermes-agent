@@ -1909,6 +1909,20 @@ def _run_job_script(script_path: str, extra_env: Optional[dict[str, str]] = None
         return False, f"Script execution failed: {exc}"
 
 
+def _cron_job_script_env(job: dict) -> dict[str, str]:
+    """Environment metadata for operator-authored cron scripts."""
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        schedule_text = str(schedule.get("expr") or schedule.get("display") or "")
+    else:
+        schedule_text = str(schedule or "")
+    return {
+        "HERMES_CRON_JOB_ID": str(job.get("id") or ""),
+        "HERMES_CRON_JOB_NAME": str(job.get("name") or ""),
+        "HERMES_CRON_SCHEDULE": schedule_text,
+    }
+
+
 
 def _scrub_internal_cron_report_noise(text: str) -> str:
     """Remove internal verifier/tooling footers from cron chat delivery."""
@@ -2018,7 +2032,10 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         if prerun_script is not None:
             success, script_output = prerun_script
         else:
-            success, script_output = _run_job_script(script_path)
+            success, script_output = _run_job_script(
+                script_path,
+                extra_env=_cron_job_script_env(job),
+            )
         if success:
             if script_output:
                 prompt = (
@@ -2363,7 +2380,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _prior_cwd = None
 
         try:
-            ok, output = _run_job_script(script_path)
+            ok, output = _run_job_script(
+                script_path,
+                extra_env=_cron_job_script_env(job),
+            )
         finally:
             if _prior_cwd is not None:
                 try:
@@ -2452,7 +2472,10 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script(script_path)
+        prerun_script = _run_job_script(
+            script_path,
+            extra_env=_cron_job_script_env(job),
+        )
         _ran_ok, _script_output = prerun_script
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
