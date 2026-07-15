@@ -8,6 +8,7 @@ import {
   buildPinArgs,
   buildPosixPinArgs,
   cachedScriptPath,
+  cleanupIncompleteFreshInstall,
   hasExistingGitCheckout,
   installedAgentInstallScript,
   resolveInstallScript,
@@ -71,6 +72,48 @@ test('existing checkout detection requires git metadata', () => {
 
     fs.mkdirSync(path.join(activeRoot, '.git'), { recursive: true })
     assert.equal(hasExistingGitCheckout(activeRoot), true)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('incomplete fresh runtime cleanup removes only a newly created canonical install root', () => {
+  const home = mkTmpHome()
+  const activeRoot = path.join(home, 'hermes-agent')
+  const events = []
+
+  try {
+    fs.mkdirSync(activeRoot, { recursive: true })
+    fs.writeFileSync(path.join(activeRoot, 'partial.txt'), 'partial\n')
+
+    assert.equal(
+      cleanupIncompleteFreshInstall({
+        activeRoot,
+        activeRootExisted: false,
+        emit: ev => events.push(ev),
+        hermesHome: home
+      }),
+      true
+    )
+    assert.equal(fs.existsSync(activeRoot), false)
+    assert.ok(events.some(ev => /removed incomplete fresh runtime/.test(ev.line || '')))
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('incomplete fresh runtime cleanup preserves a checkout that existed before bootstrap', () => {
+  const home = mkTmpHome()
+  const activeRoot = path.join(home, 'hermes-agent')
+
+  try {
+    fs.mkdirSync(activeRoot, { recursive: true })
+
+    assert.equal(
+      cleanupIncompleteFreshInstall({ activeRoot, activeRootExisted: true, emit: () => {}, hermesHome: home }),
+      false
+    )
+    assert.equal(fs.existsSync(activeRoot), true)
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

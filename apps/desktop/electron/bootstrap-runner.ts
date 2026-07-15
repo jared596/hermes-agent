@@ -119,6 +119,44 @@ function hasExistingGitCheckout(activeRoot) {
   }
 }
 
+function cleanupIncompleteFreshInstall({ activeRoot, activeRootExisted, emit, hermesHome }) {
+  if (activeRootExisted || !activeRoot || !hermesHome) {
+    return false
+  }
+
+  const resolvedRoot = path.resolve(activeRoot)
+  const expectedRoot = path.resolve(hermesHome, 'hermes-agent')
+  const samePath = IS_WINDOWS
+    ? resolvedRoot.toLowerCase() === expectedRoot.toLowerCase()
+    : resolvedRoot === expectedRoot
+
+  if (!samePath || !fs.existsSync(resolvedRoot)) {
+    return false
+  }
+
+  try {
+    fs.rmSync(resolvedRoot, { force: true, recursive: true })
+  } catch (error) {
+    if (typeof emit === 'function') {
+      emit({
+        type: 'log',
+        line: `[bootstrap] failed to remove incomplete fresh runtime at ${resolvedRoot}: ${error.message || String(error)}`
+      })
+    }
+
+    return false
+  }
+
+  if (typeof emit === 'function') {
+    emit({
+      type: 'log',
+      line: `[bootstrap] removed incomplete fresh runtime at ${resolvedRoot}`
+    })
+  }
+
+  return true
+}
+
 function cachedScriptPath(hermesHome, commit) {
   return path.join(bootstrapCacheDir(hermesHome), `install-${commit}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
 }
@@ -775,6 +813,8 @@ async function runBootstrap(opts) {
   }
 
   const runLog = openRunLog(logRoot || path.join(hermesHome, 'logs'))
+  const activeRootExisted = fs.existsSync(activeRoot)
+  let completed = false
 
   // Tee every event to the runLog AND the caller's onEvent. This gives us a
   // forensic trail per bootstrap run AND lets the renderer subscribe live.
@@ -876,6 +916,7 @@ async function runBootstrap(opts) {
 
     const marker = typeof writeMarker === 'function' ? writeMarker(markerPayload) : markerPayload
     emit({ type: 'complete', marker })
+    completed = true
 
     return { ok: true, marker }
   } catch (err) {
@@ -883,6 +924,10 @@ async function runBootstrap(opts) {
 
     return { ok: false, error: err.message || String(err) }
   } finally {
+    if (!completed) {
+      cleanupIncompleteFreshInstall({ activeRoot, activeRootExisted, emit, hermesHome })
+    }
+
     try {
       runLog.stream.end()
     } catch {
@@ -895,6 +940,7 @@ export {
   buildPinArgs,
   buildPosixPinArgs,
   cachedScriptPath,
+  cleanupIncompleteFreshInstall,
   hasExistingGitCheckout,
   installedAgentInstallScript,
   // Exposed for testability

@@ -65,7 +65,6 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { readDirForIpc } from './fs-read-dir'
-import { resolvePickerDefaultPath } from './wsl-path-bridge'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { scanGitRepos } from './git-repo-scan'
 import {
@@ -96,6 +95,7 @@ import {
 } from './hardening'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
+import { isPathInside, shouldUseActiveRuntime } from './runtime-resolution'
 import {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
@@ -128,6 +128,7 @@ import {
 import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
+import { resolvePickerDefaultPath } from './wsl-path-bridge'
 
 const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
 
@@ -370,6 +371,7 @@ const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
 // avoids the confusing "marker exists but checkout is gone" state.
 const BOOTSTRAP_COMPLETE_MARKER = path.join(ACTIVE_HERMES_ROOT, '.hermes-bootstrap-complete')
 const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
+const ACTIVE_INSTALL_METHOD_MARKER = path.join(ACTIVE_HERMES_ROOT, '.install_method')
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
@@ -3383,13 +3385,26 @@ function resolveHermesBackend(backendArgs) {
     }
   }
 
-  // 3. Bootstrap-complete ACTIVE_HERMES_ROOT -- the canonical install at
+  // 3. Completed ACTIVE_HERMES_ROOT -- the canonical install at
   //    %LOCALAPPDATA%\hermes\hermes-agent (Windows) or ~/.hermes/hermes-agent.
-  //    The bootstrap marker means install.ps1 stages finished and the user
-  //    completed initial configuration; we trust the install and go straight
-  //    to spawning hermes. Updates flow through the in-app update path
-  //    (applyUpdates -> git pull) or `hermes update` from the CLI.
-  if (isBootstrapComplete()) {
+  //    Trust a healthy runtime only when an independent signal says it predates
+  //    this launch: desktop bootstrap completed, install.sh stamped the checkout,
+  //    or this packaged developer build lives inside that checkout. A merely
+  //    importable venv can be debris from a cancelled first launch and must not
+  //    bypass the remaining install stages.
+  const bootstrapComplete = isBootstrapComplete()
+  const activeRuntimeUsable = isActiveRuntimeUsable()
+  const installMethodPresent = fileExists(ACTIVE_INSTALL_METHOD_MARKER)
+  const packagedAppInsideActiveRoot = IS_PACKAGED && isPathInside(APP_ROOT, ACTIVE_HERMES_ROOT)
+
+  if (
+    shouldUseActiveRuntime({
+      bootstrapComplete,
+      installMethodPresent,
+      packagedAppInsideActiveRoot,
+      runtimeUsable: activeRuntimeUsable
+    })
+  ) {
     return createActiveBackend(backendArgs)
   }
 
