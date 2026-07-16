@@ -12,6 +12,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import contextvars
+import inspect
 import json
 import logging
 import os
@@ -2226,6 +2227,21 @@ def _run_job_script_with_claim_heartbeat(
     storage.  ``heartbeat_run_claim`` compares that stable owner before every
     refresh, so a stale runner cannot extend a replacement owner's claim.
     """
+    def _run_script() -> tuple[bool, str]:
+        if extra_env is None:
+            return _run_job_script(script_path)
+        try:
+            params = inspect.signature(_run_job_script).parameters
+            accepts_extra_env = (
+                "extra_env" in params
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            )
+        except (TypeError, ValueError):
+            accepts_extra_env = True
+        if accepts_extra_env:
+            return _run_job_script(script_path, extra_env=extra_env)
+        return _run_job_script(script_path)
+
     schedule = job.get("schedule")
     claim = job.get("run_claim")
     owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
@@ -2234,7 +2250,7 @@ def _run_job_script_with_claim_heartbeat(
         and schedule.get("kind") == "once"
         and owner
     ):
-        return _run_job_script(script_path, extra_env=extra_env)
+        return _run_script()
 
     job_id = str(job.get("id") or "")
     stop = threading.Event()
@@ -2265,10 +2281,10 @@ def _run_job_script_with_claim_heartbeat(
             job_id,
             exc_info=True,
         )
-        return _run_job_script(script_path, extra_env=extra_env)
+        return _run_script()
 
     try:
-        return _run_job_script(script_path, extra_env=extra_env)
+        return _run_script()
     finally:
         stop.set()
         # Event.wait() wakes immediately.  Keep completion bounded if the
