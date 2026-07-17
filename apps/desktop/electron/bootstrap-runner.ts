@@ -122,6 +122,7 @@ function cleanupIncompleteFreshInstall({ activeRoot, activeRootExisted, emit, he
 
   const resolvedRoot = path.resolve(activeRoot)
   const expectedRoot = path.resolve(hermesHome, 'hermes-agent')
+
   const samePath = IS_WINDOWS
     ? resolvedRoot.toLowerCase() === expectedRoot.toLowerCase()
     : resolvedRoot === expectedRoot
